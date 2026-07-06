@@ -155,6 +155,6 @@ extern "C" {
         cusparseDestroySpMat(matA);
         cusparseDestroyDnVec(vecX);
         cusparseDestroyDnVec(vecY);
-        cudaFree(&dBuffer);
+        cudaFree(dBuffer);
     }
 }
