@@ -564,12 +564,12 @@ def make_precond(solvent_obj, drho_ions_scr=None):
     L = solver.L
     precond = L / spacing**2 + scipy.sparse.diags(drho_ions_scr.get(), format='csr')
 
-    if solvent_obj.hirarchy is None:
+    if solvent_obj.hierarchy is None:
         verbose = solvent_obj.verbose
         log = gpulogger.new_logger(solvent_obj, verbose)
         t0 = log.init_timer()
         handle = solvent_obj.handle
-        hirarchy = libamgcl.amg_create(handle,
+        hierarchy = libamgcl.amg_create(handle,
                                        ctypes.c_int(tot_ngrids),
                                        precond.indptr.ctypes.data,
                                        precond.indices.ctypes.data,
@@ -581,12 +581,12 @@ def make_precond(solvent_obj, drho_ions_scr=None):
                                        ctypes.c_int(1),
                                        ctypes.c_int(1),
                                        ctypes.c_int(1))
-        solvent_obj.hirarchy = hirarchy
+        solvent_obj.hierarchy = hierarchy
         t0 = log.timer('make_precond', *t0)
-    hirarchy = solvent_obj.hirarchy
+    hierarchy = solvent_obj.hierarchy
 
     def vcycle(r, out):
-        libamgcl.amg_vcycle(ctypes.c_void_p(hirarchy),
+        libamgcl.amg_vcycle(ctypes.c_void_p(hierarchy),
                             r.data.ptr,
                             out.data.ptr,
                             ctypes.c_int(tot_ngrids))
@@ -596,11 +596,11 @@ def make_precond(solvent_obj, drho_ions_scr=None):
 
 def _release_caches(solvent_obj):
     """Release memory after make_phi"""
-    if getattr(solvent_obj, 'hirarchy', None) is not None:
-        hirarchy = solvent_obj.hirarchy
-        libamgcl.amg_destroy(ctypes.c_void_p(hirarchy))
+    if getattr(solvent_obj, 'hierarchy', None) is not None:
+        hierarchy = solvent_obj.hierarchy
+        libamgcl.amg_destroy(ctypes.c_void_p(hierarchy))
     libamgcl._cusparseDestroy(solvent_obj.handle)
-    solvent_obj.hirarchy = None
+    solvent_obj.hierarchy = None
 
 def make_phi(solvent_obj, bias=None, phi_sol=None, rho_sol=None):
     if solvent_obj._intermediates is None: solvent_obj.build()
@@ -746,10 +746,12 @@ class NLPBE(pbe.NLPBE):
 
     def build(self):
         super().build()
-        # Create cuSPARSE handle
-        handle = ctypes.c_void_p(0)
-        libamgcl._cusparseCreate(ctypes.byref(handle))
-        self.handle = handle
+        device_id = cupy.cuda.Device().id
+        with cupy.cuda.Device(device_id):
+            # Create cuSPARSE handle
+            handle = ctypes.c_void_p(0)
+            libamgcl._cusparseCreate(ctypes.byref(handle))
+            self.handle = handle
         return self
 
     def _gen_get_rho_ions(self):
@@ -764,7 +766,7 @@ class NLPBE(pbe.NLPBE):
         self._intermediates = None
         if self.handle is not None:
             _release_caches(self)
-            self.hirarchy = None
+            self.hierarchy = None
             self.operator = None
             self.precond = None
             self.handle = None
