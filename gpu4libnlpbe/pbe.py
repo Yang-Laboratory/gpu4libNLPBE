@@ -11,7 +11,7 @@ from pyscf.lib import logger
 from gpu4pyscf.lib import logger as gpulogger
 from libnlpbe import pbe
 from pyscf import lib
-
+import gpu4libnlpbe
 from pyscf import df
 from pyscf import gto
 from pyscf.scf import _vhf
@@ -28,8 +28,7 @@ PI = numpy.pi
 KB2HARTREE = BOLTZMANN / HARTREE2J
 M2HARTREE = AVOGADRO*BOHR**3*1.e-27
 
-# libamgcl = lib.load_library(os.path.join(monkey.__path__[0], 'lib', 'libdinmh.so'))
-libamgcl = lib.load_library(os.path.join(os.getcwd(), 'lib', 'libdinmh.so'))
+libamgcl = lib.load_library(os.path.join(gpu4libnlpbe.__path__[0], 'lib', 'libdinmh.so'))
 libamgcl.amg_create.argtypes = [
     ctypes.c_void_p, # handle
     ctypes.c_int, # tot_ngrids
