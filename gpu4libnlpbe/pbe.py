@@ -329,7 +329,7 @@ def make_phi_sol(solvent_obj, dm=None, coords=None):
         coords = solvent_obj.grids.coords
 
     verbose = solvent_obj.verbose
-    log = logger.new_logger(solvent_obj, verbose)
+    log = gpulogger.new_logger(solvent_obj, verbose)
     t0 = log.init_timer()
     mol = solvent_obj.mol
     tot_ngrids = coords.shape[0]
@@ -438,7 +438,6 @@ def drho_ions_one_to_one(solvent_obj, phi_tot=None, cb=None, lambda_r=None, T=No
 
 
 def make_operator(solvent_obj, grad_lneps=None):
-    solver = solvent_obj.solver
     spacing = solvent_obj.grids.spacing
     ngrids = solvent_obj.grids.ngrids
     tot_ngrids = ngrids**3
@@ -449,7 +448,7 @@ def make_operator(solvent_obj, grad_lneps=None):
         grad_eps = _intermediates['grad_eps']
         grad_lneps = grad_eps / eps[:,None]
 
-    L = solver.L # nabla**2 = -L / spacing**2
+    L = solvent_obj.L # nabla**2 = -L / spacing**2
     # A = nabla ln(eps) * nabla - L / spacing**2
     if solvent_obj.operator is None:
         grad = make_gradient_matrix(ngrids)
@@ -479,12 +478,11 @@ def make_operator(solvent_obj, grad_lneps=None):
     return apply_A
 
 def make_precond(solvent_obj, drho_ions_scr=None):
-    solver = solvent_obj.solver
     spacing = solvent_obj.grids.spacing
     ngrids = solvent_obj.grids.ngrids
     tot_ngrids = ngrids**3
 
-    L = solver.L
+    L = solvent_obj.L
     precond = L / spacing**2 + scipy.sparse.diags(drho_ions_scr.get(), format='csr')
 
     if solvent_obj.hierarchy is None:
@@ -525,7 +523,7 @@ def _release_caches(solvent_obj):
     libamgcl._cusparseDestroy(solvent_obj.handle)
     solvent_obj.hierarchy = None
 
-def make_phi(solvent_obj, bias=None, phi_sol=None, rho_sol=None):
+def make_phi(solvent_obj, phi_sol=None, rho_sol=None):
     if solvent_obj._intermediates is None: solvent_obj.build()
     _intermediates = solvent_obj._intermediates
 
@@ -533,17 +531,11 @@ def make_phi(solvent_obj, bias=None, phi_sol=None, rho_sol=None):
     tot_ngrids = solvent_obj.grids.get_ngrids()
     T = solvent_obj.T
     spacing = solvent_obj.grids.spacing
-    stern_sam = solvent_obj.stern_sam / BOHR
     cb = solvent_obj.cb * M2HARTREE
-    pzc = solvent_obj.pzc / HARTREE2EV
-    ref_pot = solvent_obj.ref_pot / HARTREE2EV
-    jump_coeff = solvent_obj.jump_coeff
 
     eps = _intermediates['eps']
     lambda_r = _intermediates['lambda_r']
     grad_eps = _intermediates['grad_eps']
-
-    solver = solvent_obj.solver
 
     max_cycle = solvent_obj.max_cycle # Newton cycle
     inner_max_cycle = 100 # Inner cycle
@@ -695,6 +687,7 @@ class NLPBE(pbe.NLPBE):
             self.handle = None
         return self
 
+    make_phi_sol = make_phi_sol
     make_operator = make_operator
     make_precond = make_precond
     make_phi = make_phi
