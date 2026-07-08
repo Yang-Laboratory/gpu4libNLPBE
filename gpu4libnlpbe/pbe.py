@@ -17,7 +17,7 @@ from pyscf import gto
 from pyscf.scf import _vhf
 from gpu4pyscf.lib.cupy_helper import pack_tril
 from gpu4pyscf.gto.mole import cart2sph_by_l
-from gpu4pyscf.scf.int4c2e import libgint
+from gpu4pyscf.scf.int4c2e import libgint, libgvhf
 from gpu4pyscf.df.int3c2e import make_fake_mol, get_pairing, get_ao_pairs
 from gpu4pyscf.df.int3c2e import VHFOpt
 from gpu4pyscf.df import int3c2e_bdiv
@@ -227,6 +227,10 @@ def _build_grids(self, coords, expnt=1e16):
     ncptype = len(self.log_qs)
     self.cp_idx, self.cp_jdx = numpy.tril_indices(ncptype)
 
+    # Collect GPU memory
+    if getattr(self, '_bpcache', None):
+        for device_id, bpcache in self._bpcache.items():
+            libgvhf.GINTdel_basis_prod(ctypes.byref(bpcache))
     self._bpcache = {}
 
 def int2e_grids(intopt, coords, cK, out, off, charge_exponents=1e16, direct_scf_tol=1e-14):
