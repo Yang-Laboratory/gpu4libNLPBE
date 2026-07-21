@@ -64,6 +64,24 @@ libamgcl.csr_matvec.restype = None
 
 make_gradient_matrix = pbe.make_gradient_matrix
 
+def gradient(solvent_obj, phi, ngrids, spacing):
+    """8th-order finite-difference gradient of a scalar cupy field.
+
+    Returns an ``(n_grid, 3)`` cupy array. Used at convergence to build the
+    polarization charge density ``rho_pol``; matches the stencil used to
+    assemble the linear operator in :func:`make_operator`.
+    """
+    grad = make_gradient_matrix(ngrids)
+    I = scipy.sparse.identity(ngrids, format='csr')
+    G = (scipy.sparse.kron(grad, scipy.sparse.kron(I, I)),
+         scipy.sparse.kron(I, scipy.sparse.kron(grad, I)),
+         scipy.sparse.kron(I, scipy.sparse.kron(I, grad)))
+    dphi = cupy.empty((phi.size, 3), dtype=cupy.float64)
+    for xi in range(3):
+        Gx = cupyx.scipy.sparse.csr_matrix(G[xi])
+        dphi[:, xi] = Gx.dot(phi) / spacing
+    return dphi
+
 def _basis_seg_contraction(mol, allow_replica=1, sparse_coeff=False):
     # from gpu4pyscf.gto.mole import basis_seg_contraction
     _bas = mol._bas
@@ -542,7 +560,7 @@ def make_phi(solvent_obj, phi_sol=None, rho_sol=None):
     grad_eps = _intermediates['grad_eps']
 
     max_cycle = solvent_obj.max_cycle # Newton cycle
-    inner_max_cycle = 100 # Inner cycle
+    inner_max_cycle = solvent_obj.inner_max_cycle
 
     C_TST = 0.01
     p_TST = 1.0
@@ -550,6 +568,8 @@ def make_phi(solvent_obj, phi_sol=None, rho_sol=None):
     grad_lneps = grad_eps / eps[:, None]
     get_rho_ions = solvent_obj._gen_get_rho_ions()
     get_drho_ions = solvent_obj._gen_drho_ions()
+
+    bc, const_src = solvent_obj._eval_boundary(ngrids, spacing)
 
     inv_eps = cupy.array(4.0 * PI / eps)
 
@@ -561,32 +581,42 @@ def make_phi(solvent_obj, phi_sol=None, rho_sol=None):
         drho_ions_scr = -inv_eps * get_drho_ions(solvent_obj, cupy.zeros(tot_ngrids), cb, lambda_r, T)
 
     precond = solvent_obj.make_precond(drho_ions_scr)
+
     rho_sol = cupy.asarray(rho_sol)
     grad_lneps = cupy.asarray(grad_lneps)
     eps = cupy.asarray(eps)
 
-    def residual(phi_tot, out):
+    def residual(phi_opt, out):
+        phi_tot = phi_opt + bc
         rho_ions = get_rho_ions(solvent_obj, phi_tot, cb, lambda_r, T)
         if cupy.isnan(rho_ions).any():
             return None, rho_ions
         rho_tot = rho_sol + rho_ions
-        A(phi_tot, out)
-        out += inv_eps * rho_tot
+        A(phi_opt, out)
+        out += inv_eps * rho_tot + const_src
         return out, rho_ions
+
+    def finalize(phi_opt, rho_ions):
+        rho_tot = rho_sol + rho_ions
+        dphi = solvent_obj.gradient(phi_opt, ngrids, spacing)
+        rho_iter = 0.25 / PI * (grad_lneps * dphi).sum(axis=1)
+        rho_pol = (1.0 - eps) / eps * rho_tot + rho_iter
+        phi_tot = phi_opt + bc
+        return phi_tot.get(), rho_ions.get(), rho_pol.get()
 
     logger.info(solvent_obj, ' -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*')
     logger.info(solvent_obj, ' |  Poisson-Boltzmann Solver with the Multigrid Scheme  |')
     logger.info(solvent_obj, ' -*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*')
 
-    phi_tot = cupy.zeros(tot_ngrids, dtype=cupy.float64)
+    phi_opt = cupy.zeros(tot_ngrids, dtype=cupy.float64)
     res_old = cupy.empty(tot_ngrids, dtype=cupy.float64)
     res_new = cupy.empty(tot_ngrids, dtype=cupy.float64)
-    res_outer, rho_ions = residual(phi_tot, res_new)
+    res_outer, rho_ions = residual(phi_opt, res_new)
 
     if res_outer is None:
         logger.info(solvent_obj, 'Skipping PBE due to infinite ion charge density.')
-        return None, None
-    
+        return None, None, None
+
     fnorm = cupy.linalg.norm(res_outer)
 
     res_inner = cupy.empty(tot_ngrids, dtype=cupy.float64)
@@ -598,6 +628,7 @@ def make_phi(solvent_obj, phi_sol=None, rho_sol=None):
 
     cycle = 0
     while cycle < max_cycle:
+        phi_tot = phi_opt + bc
         drho_ions = get_drho_ions(solvent_obj, phi_tot, cb, lambda_r, T)
         jac_diag = inv_eps * drho_ions
 
@@ -624,7 +655,7 @@ def make_phi(solvent_obj, phi_sol=None, rho_sol=None):
         damping = 1.0
         accepted = False
         while damping > 1.0e-5:
-            res_try, rho_ions_try = residual(phi_tot + damping * v, res_old)
+            res_try, rho_ions_try = residual(phi_opt + damping * v, res_old)
             if res_try is not None:
                 fnorm_try = cupy.linalg.norm(res_try)
                 if fnorm_try < (1.0 - damping / 10**4) * fnorm:
@@ -635,13 +666,13 @@ def make_phi(solvent_obj, phi_sol=None, rho_sol=None):
         if not accepted:
             logger.warn(solvent_obj, 'Newton line search failed at cycle %d '
                         '(||F|| = %4.3e, inner = %d).', cycle + 1, fnorm, inner)
-            res_try, rho_ions_try = residual(phi_tot + damping * v, res_old)
+            res_try, rho_ions_try = residual(phi_opt + damping * v, res_old)
             if res_try is None:
                 logger.info(solvent_obj, 'Skipping PBE due to infinite ion charge density.')
-                return None, None
-            fnorm_try = numpy.linalg.norm(res_try)
+                return None, None, None
+            fnorm_try = cupy.linalg.norm(res_try)
 
-        phi_tot = phi_tot + damping * v
+        phi_opt = phi_opt + damping * v
         res_outer, rho_ions = res_try, rho_ions_try
         fnorm = fnorm_try
         res_new, res_old = res_old, res_new   # accepted trial becomes current
@@ -651,9 +682,8 @@ def make_phi(solvent_obj, phi_sol=None, rho_sol=None):
 
         if fnorm < 1.0e-9:
             t0 = logger.timer(solvent_obj, 'phi_tot', *t0)
-            return phi_tot.get(), rho_ions.get()
+            return finalize(phi_opt, rho_ions)
 
-    logger.info(solvent_obj, 'Newton PBE failed to converge.')
     raise RuntimeError('Newton PBE solver failed to converge.')
 
 
@@ -691,6 +721,7 @@ class NLPBE(pbe.NLPBE):
             self.handle = None
         return self
 
+    gradient = gradient
     make_phi_sol = make_phi_sol
     make_operator = make_operator
     make_precond = make_precond
