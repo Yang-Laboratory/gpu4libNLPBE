@@ -16,6 +16,7 @@ from pyscf import df
 from pyscf import gto
 from pyscf.scf import _vhf
 from gpu4pyscf.lib.cupy_helper import pack_tril
+from gpu4pyscf.dft import numint as _ni
 from gpu4pyscf.gto.mole import cart2sph_by_l
 from gpu4pyscf.scf.int4c2e import libgint, libgvhf
 from gpu4pyscf.df.int3c2e import make_fake_mol, get_pairing, get_ao_pairs
@@ -569,7 +570,7 @@ def make_phi(solvent_obj, phi_sol=None, rho_sol=None):
     get_rho_ions = solvent_obj._gen_get_rho_ions()
     get_drho_ions = solvent_obj._gen_drho_ions()
 
-    bc, const_src = solvent_obj._eval_boundary(ngrids, spacing)
+    bc, const_src = solvent_obj._boundary_conditions(ngrids, spacing)
 
     inv_eps = cupy.array(4.0 * PI / eps)
 
@@ -708,6 +709,30 @@ class NLPBE(pbe.NLPBE):
 
     def _gen_drho_ions(self):
         return drho_ions_one_to_one
+
+    def _get_vmat(self, phi_pol):
+        mol = self.mol
+        coords = self.grids.coords
+        spacing = self.grids.spacing
+        nao = mol.nao
+        tot_ngrids = self.grids.get_ngrids()
+
+        nbatch = 256*256
+        phi_pol = cupy.asarray(phi_pol)
+        buf = cupy.empty((nbatch, nao), order='C')
+        vmat = cupy.zeros((nao, nao), order='C')
+        verbose = mol.verbose
+        mol.verbose = 0
+        log = gpulogger.new_logger(self, verbose)
+        t0 = log.init_timer()
+        for p0, p1 in lib.prange(0, tot_ngrids, nbatch):
+            ao = _ni.eval_ao(mol, coords[p0:p1])
+            buf[:p1-p0] = ao * phi_pol[p0:p1, None]
+            vmat -= cupy.dot(buf[:p1-p0].T, ao)
+        vmat *= spacing**3
+        mol.verbose = verbose
+        t0 = log.timer('v_diel', *t0)
+        return vmat.get()
 
     def reset(self, mol=None):
         if mol is not None:
